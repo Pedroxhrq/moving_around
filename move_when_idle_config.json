@@ -1,0 +1,18 @@
+{
+  "idle_seconds": 60,
+  "poll_seconds": 0.5,
+  "lock_poll_seconds": 1.0,
+  "lock_status_log_seconds": 60,
+  "user_move_tolerance_pixels": 4,
+  "log_include_date": false,
+  "active_windows": [
+    {
+      "start": "08:00",
+      "end": "12:00"
+    },
+    {
+      "start": "13:12",
+      "end": "18:00"
+    }
+  ]
+}
