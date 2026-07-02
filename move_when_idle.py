@@ -1,4 +1,4 @@
-"""Move the Windows cursor after configured keyboard/mouse idle time.
+﻿"""Move the Windows cursor after configured keyboard/mouse idle time.
 
 No clicks are sent. Press Ctrl+C in the terminal to stop the script.
 """
@@ -181,6 +181,12 @@ def log_action(message: str) -> None:
     print(f"[{datetime.now():{timestamp_format}}] {message}", flush=True)
 
 
+def desktop_status_detail(status: DesktopStatus) -> str:
+    if status.error_code:
+        return f"{status.stage} error: {status.error_code}"
+    return f"{status.stage} failed without a Windows error code"
+
+
 def default_desktop_status() -> DesktopStatus:
     ctypes.set_last_error(0)
     desktop = user32.OpenDesktopW("Default", 0, False, DESKTOP_SWITCHDESKTOP)
@@ -207,7 +213,7 @@ def pause_for_lock_screen() -> float:
 
     log_action(
         "Windows desktop unavailable, possibly locked. "
-        f"Pausing. {status.stage} error: {status.error_code}."
+        f"Pausing. {desktop_status_detail(status)}."
     )
     paused_at = sleep_clock.monotonic()
     last_status_log_at = paused_at
@@ -222,7 +228,7 @@ def pause_for_lock_screen() -> float:
 
         now = sleep_clock.monotonic()
         if now - last_status_log_at >= CONFIG.lock_status_log_seconds:
-            log_action(f"Still paused. {status.stage} error: {status.error_code}.")
+            log_action(f"Still paused. {desktop_status_detail(status)}.")
             last_status_log_at = now
 
 
@@ -464,3 +470,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
