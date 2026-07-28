@@ -14,8 +14,10 @@ The script does not click, drag, type, or interact with windows. It only changes
 - If you use the keyboard or mouse at any time, the automatic movement pauses immediately.
 - After input stops again, the script starts a new idle countdown.
 - Outside the configured time windows, the script stays running but does not move the cursor.
-- If Windows is locked, the script pauses until the desktop is available again, then resumes without counting the paused time as active work.
+- If the Windows session is confirmed locked, the script pauses until a confirmed unlock, then resumes without counting the paused time as active work. Ordinary keyboard/mouse idle time is not treated as a lock. Recurring lock-status messages are printed only during configured active time windows.
 - CLI action messages include the local time in `HH:MM:SS` format by default. Set `log_include_date` to `true` to print `YYYY-MM-DD HH:MM:SS`.
+- When the script stops, it prints the session totals for `IDLE` and `not IDLE` in `HH:MM:SS` format. `IDLE` begins when the configured idle threshold is reached; lock-screen time is excluded from both totals.
+- Session totals cover all unlocked runtime, including periods outside the configured active time windows.
 
 ### Requirements
 
@@ -41,6 +43,12 @@ python .\move_when_idle.py
 ### How to Stop
 
 Press `Ctrl+C` in the terminal where the script is running.
+
+The final log entry shows the session totals, for example:
+
+```text
+[18:03:27] Session totals (lock-screen time excluded): IDLE 00:42:18; not IDLE 01:16:09.
+```
 
 ### Configuration
 
@@ -97,8 +105,10 @@ O script não clica, não arrasta, não digita e não interage com janelas. Ele 
 - Se você usar o teclado ou o mouse em qualquer momento, o movimento automático pausa imediatamente.
 - Depois que a entrada parar novamente, o script começa uma nova contagem de ociosidade.
 - Fora das janelas de horário configuradas, o script continua rodando, mas não move o cursor.
-- Se o Windows estiver bloqueado, o script pausa até a área de trabalho ficar disponível novamente e depois continua sem contar o tempo pausado como trabalho ativo.
+- Se a sessão do Windows estiver confirmadamente bloqueada, o script pausa até o desbloqueio ser confirmado e depois continua sem contar o tempo pausado como trabalho ativo. A ociosidade normal do teclado e do mouse não é tratada como bloqueio. As mensagens periódicas sobre o bloqueio são exibidas apenas durante as janelas de horário ativas configuradas.
 - As mensagens de ação no CLI incluem o horário local no formato `HH:MM:SS` por padrão. Defina `log_include_date` como `true` para imprimir `YYYY-MM-DD HH:MM:SS`.
+- Quando o script para, ele mostra os totais da sessão para `IDLE` e `not IDLE` no formato `HH:MM:SS`. O tempo `IDLE` começa quando o limite de ociosidade configurado é atingido; o tempo da tela bloqueada não entra em nenhum dos totais.
+- Os totais da sessão cobrem todo o tempo desbloqueado, inclusive os períodos fora das janelas de horário ativas configuradas.
 
 ### Requisitos
 
@@ -124,6 +134,12 @@ python .\move_when_idle.py
 ### Como Parar
 
 Pressione `Ctrl+C` no terminal onde o script está rodando.
+
+A última entrada do log mostra os totais da sessão, por exemplo:
+
+```text
+[18:03:27] Session totals (lock-screen time excluded): IDLE 00:42:18; not IDLE 01:16:09.
+```
 
 ### Configuração
 

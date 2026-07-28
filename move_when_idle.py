@@ -17,7 +17,10 @@ from datetime import datetime, time
 from pathlib import Path
 
 
-DESKTOP_SWITCHDESKTOP = 0x0100
+WTS_CURRENT_SESSION = 0xFFFFFFFF
+WTS_SESSION_INFO_EX = 25
+WTS_SESSIONSTATE_LOCK = 0
+WTS_SESSIONSTATE_UNLOCK = 1
 CONFIG_PATH = Path(__file__).with_name("move_when_idle_config.json")
 
 DEFAULT_CONFIG = {
@@ -128,6 +131,7 @@ CONFIG = load_config(CONFIG_PATH)
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+wtsapi32 = ctypes.WinDLL("wtsapi32", use_last_error=True)
 
 
 class Point(ctypes.Structure):
@@ -141,11 +145,79 @@ class LastInputInfo(ctypes.Structure):
     ]
 
 
+class WtsInfoExLevel1(ctypes.Structure):
+    _fields_ = [
+        ("SessionId", wintypes.ULONG),
+        ("SessionState", ctypes.c_int),
+        ("SessionFlags", wintypes.LONG),
+        ("WinStationName", wintypes.WCHAR * 33),
+        ("UserName", wintypes.WCHAR * 21),
+        ("DomainName", wintypes.WCHAR * 18),
+        ("LogonTime", ctypes.c_longlong),
+        ("ConnectTime", ctypes.c_longlong),
+        ("DisconnectTime", ctypes.c_longlong),
+        ("LastInputTime", ctypes.c_longlong),
+        ("CurrentTime", ctypes.c_longlong),
+        ("IncomingBytes", wintypes.DWORD),
+        ("OutgoingBytes", wintypes.DWORD),
+        ("IncomingFrames", wintypes.DWORD),
+        ("OutgoingFrames", wintypes.DWORD),
+        ("IncomingCompressedBytes", wintypes.DWORD),
+        ("OutgoingCompressedBytes", wintypes.DWORD),
+    ]
+
+
+class WtsInfoExLevel(ctypes.Union):
+    _fields_ = [("Level1", WtsInfoExLevel1)]
+
+
+class WtsInfoEx(ctypes.Structure):
+    _fields_ = [
+        ("Level", wintypes.DWORD),
+        ("Data", WtsInfoExLevel),
+    ]
+
+
 @dataclass(frozen=True)
-class DesktopStatus:
-    available: bool
-    stage: str
-    error_code: int
+class SessionStatus:
+    locked: bool | None
+    detail: str
+    error_code: int = 0
+
+
+@dataclass
+class RuntimeStats:
+    idle_seconds: float = 0.0
+    not_idle_seconds: float = 0.0
+    _is_idle: bool = False
+    _last_updated_at: float | None = None
+
+    def update(self, is_idle: bool) -> None:
+        now = sleep_clock.monotonic()
+        self._record_until(now)
+        self._is_idle = is_idle
+        self._last_updated_at = now
+
+    def pause(self) -> None:
+        if self._last_updated_at is None:
+            return
+        now = sleep_clock.monotonic()
+        self._record_until(now)
+        self._last_updated_at = None
+
+    def finish(self) -> None:
+        if self._last_updated_at is not None:
+            self._record_until(sleep_clock.monotonic())
+            self._last_updated_at = None
+
+    def _record_until(self, now: float) -> None:
+        if self._last_updated_at is None:
+            return
+        elapsed = max(0.0, now - self._last_updated_at)
+        if self._is_idle:
+            self.idle_seconds += elapsed
+        else:
+            self.not_idle_seconds += elapsed
 
 
 user32.GetCursorPos.argtypes = [ctypes.POINTER(Point)]
@@ -156,14 +228,18 @@ user32.GetSystemMetrics.argtypes = [ctypes.c_int]
 user32.GetSystemMetrics.restype = ctypes.c_int
 user32.GetLastInputInfo.argtypes = [ctypes.POINTER(LastInputInfo)]
 user32.GetLastInputInfo.restype = wintypes.BOOL
-user32.OpenDesktopW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-user32.OpenDesktopW.restype = wintypes.HANDLE
-user32.SwitchDesktop.argtypes = [wintypes.HANDLE]
-user32.SwitchDesktop.restype = wintypes.BOOL
-user32.CloseDesktop.argtypes = [wintypes.HANDLE]
-user32.CloseDesktop.restype = wintypes.BOOL
 kernel32.GetTickCount.argtypes = []
 kernel32.GetTickCount.restype = wintypes.DWORD
+wtsapi32.WTSQuerySessionInformationW.argtypes = [
+    wintypes.HANDLE,
+    wintypes.DWORD,
+    ctypes.c_int,
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(wintypes.DWORD),
+]
+wtsapi32.WTSQuerySessionInformationW.restype = wintypes.BOOL
+wtsapi32.WTSFreeMemory.argtypes = [ctypes.c_void_p]
+wtsapi32.WTSFreeMemory.restype = None
 
 try:
     user32.SetProcessDPIAware()
@@ -181,54 +257,96 @@ def log_action(message: str) -> None:
     print(f"[{datetime.now():{timestamp_format}}] {message}", flush=True)
 
 
-def desktop_status_detail(status: DesktopStatus) -> str:
+def format_duration(total_seconds: float) -> str:
+    rounded_seconds = round(max(0.0, total_seconds))
+    hours, remainder = divmod(rounded_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def session_status_detail(status: SessionStatus) -> str:
     if status.error_code:
-        return f"{status.stage} error: {status.error_code}"
-    return f"{status.stage} failed without a Windows error code"
+        return f"{status.detail}. Windows error: {status.error_code}"
+    return status.detail
 
 
-def default_desktop_status() -> DesktopStatus:
+def parse_session_status(info: WtsInfoEx) -> SessionStatus:
+    if info.Level != 1:
+        return SessionStatus(None, f"Unexpected WTSSessionInfoEx level: {info.Level}")
+
+    session_flags = int(info.Data.Level1.SessionFlags)
+    if session_flags == WTS_SESSIONSTATE_LOCK:
+        return SessionStatus(True, "Windows session is locked")
+    if session_flags == WTS_SESSIONSTATE_UNLOCK:
+        return SessionStatus(False, "Windows session is unlocked")
+    return SessionStatus(None, f"Unknown Windows session flag: {session_flags}")
+
+
+def windows_session_status() -> SessionStatus:
+    buffer = ctypes.c_void_p()
+    bytes_returned = wintypes.DWORD()
     ctypes.set_last_error(0)
-    desktop = user32.OpenDesktopW("Default", 0, False, DESKTOP_SWITCHDESKTOP)
-    if not desktop:
-        return DesktopStatus(False, "OpenDesktopW", ctypes.get_last_error())
+    if not wtsapi32.WTSQuerySessionInformationW(
+        None,
+        WTS_CURRENT_SESSION,
+        WTS_SESSION_INFO_EX,
+        ctypes.byref(buffer),
+        ctypes.byref(bytes_returned),
+    ):
+        return SessionStatus(
+            None,
+            "WTSQuerySessionInformationW failed",
+            ctypes.get_last_error(),
+        )
 
     try:
-        ctypes.set_last_error(0)
-        if user32.SwitchDesktop(desktop):
-            return DesktopStatus(True, "SwitchDesktop", 0)
-        return DesktopStatus(False, "SwitchDesktop", ctypes.get_last_error())
+        expected_size = ctypes.sizeof(WtsInfoEx)
+        if bytes_returned.value < expected_size:
+            return SessionStatus(
+                None,
+                f"WTSSessionInfoEx returned {bytes_returned.value} bytes; expected {expected_size}",
+            )
+        info = ctypes.cast(buffer, ctypes.POINTER(WtsInfoEx)).contents
+        return parse_session_status(info)
     finally:
-        user32.CloseDesktop(desktop)
+        wtsapi32.WTSFreeMemory(buffer)
 
 
-def default_desktop_available() -> bool:
-    return default_desktop_status().available
+def interactive_session_available() -> bool:
+    return windows_session_status().locked is not True
 
 
-def pause_for_lock_screen() -> float:
-    status = default_desktop_status()
-    if status.available:
+def pause_for_lock_screen(stats: RuntimeStats | None = None) -> float:
+    status = windows_session_status()
+    if status.locked is not True:
         return 0.0
 
-    log_action(
-        "Windows desktop unavailable, possibly locked. "
-        f"Pausing. {desktop_status_detail(status)}."
-    )
+    if stats is not None:
+        stats.pause()
+    log_action("Windows session is locked. Pausing.")
     paused_at = sleep_clock.monotonic()
     last_status_log_at = paused_at
 
     while True:
         sleep_clock.sleep(CONFIG.lock_poll_seconds)
-        status = default_desktop_status()
-        if status.available:
+        status = windows_session_status()
+        if status.locked is False:
             paused_for = sleep_clock.monotonic() - paused_at
-            log_action("Windows desktop available. Resuming.")
+            if stats is not None:
+                stats.update(currently_idle())
+            log_action("Windows session is unlocked. Resuming.")
             return paused_for
 
         now = sleep_clock.monotonic()
         if now - last_status_log_at >= CONFIG.lock_status_log_seconds:
-            log_action(f"Still paused. {desktop_status_detail(status)}.")
+            if active_now():
+                if status.locked is None:
+                    log_action(
+                        "Still paused while waiting for a confirmed unlock. "
+                        f"{session_status_detail(status)}."
+                    )
+                else:
+                    log_action("Still paused. Windows session remains locked.")
             last_status_log_at = now
 
 
@@ -245,29 +363,33 @@ def seconds_since_last_input() -> float:
     return elapsed_ms / 1000
 
 
+def currently_idle() -> bool:
+    return seconds_since_last_input() >= CONFIG.idle_seconds
+
+
 def input_changed_since(last_seen_tick: int) -> bool:
     return last_input_tick_count() != last_seen_tick
 
 
-def cursor_position() -> tuple[int, int]:
+def cursor_position(stats: RuntimeStats | None = None) -> tuple[int, int]:
     while True:
-        pause_for_lock_screen()
+        pause_for_lock_screen(stats)
         point = Point()
         if user32.GetCursorPos(ctypes.byref(point)):
             return point.x, point.y
         error_code = ctypes.get_last_error()
-        if default_desktop_available():
+        if interactive_session_available():
             raise ctypes.WinError(error_code)
 
 
-def set_cursor_position(position: tuple[int, int]) -> None:
+def set_cursor_position(position: tuple[int, int], stats: RuntimeStats | None = None) -> None:
     x, y = position
     while True:
-        pause_for_lock_screen()
+        pause_for_lock_screen(stats)
         if user32.SetCursorPos(int(x), int(y)):
             return
         error_code = ctypes.get_last_error()
-        if default_desktop_available():
+        if interactive_session_available():
             raise ctypes.WinError(error_code)
 
 
@@ -374,16 +496,20 @@ def human_like_path(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[
     return path
 
 
-def wait_for(seconds: float, expected_position: tuple[int, int]) -> tuple[bool, tuple[int, int]]:
+def wait_for(
+    seconds: float,
+    expected_position: tuple[int, int],
+    stats: RuntimeStats,
+) -> tuple[bool, tuple[int, int]]:
     deadline = sleep_clock.monotonic() + seconds
     latest = expected_position
     last_seen_input = last_input_tick_count()
 
     while sleep_clock.monotonic() < deadline:
-        deadline += pause_for_lock_screen()
+        deadline += pause_for_lock_screen(stats)
         sleep_clock.sleep(min(0.2, max(0, deadline - sleep_clock.monotonic())))
-        deadline += pause_for_lock_screen()
-        latest = cursor_position()
+        deadline += pause_for_lock_screen(stats)
+        latest = cursor_position(stats)
         if input_changed_since(last_seen_input):
             return False, latest
         if distance(latest, expected_position) > CONFIG.user_move_tolerance_pixels:
@@ -392,8 +518,8 @@ def wait_for(seconds: float, expected_position: tuple[int, int]) -> tuple[bool, 
     return True, latest
 
 
-def move_once(bounds: tuple[int, int, int, int]) -> tuple[bool, tuple[int, int]]:
-    start = cursor_position()
+def move_once(bounds: tuple[int, int, int, int], stats: RuntimeStats) -> tuple[bool, tuple[int, int]]:
+    start = cursor_position(stats)
     target = pick_target(start, bounds)
     path = human_like_path(start, target)
     expected = start
@@ -402,19 +528,19 @@ def move_once(bounds: tuple[int, int, int, int]) -> tuple[bool, tuple[int, int]]
     last_seen_input = last_input_tick_count()
 
     for point in path:
-        pause_for_lock_screen()
-        current = cursor_position()
+        pause_for_lock_screen(stats)
+        current = cursor_position(stats)
         if input_changed_since(last_seen_input):
             return False, current
         if distance(current, expected) > CONFIG.user_move_tolerance_pixels:
             return False, current
 
-        set_cursor_position(point)
+        set_cursor_position(point, stats)
         expected = point
         last_seen_input = last_input_tick_count()
         sleep_clock.sleep(step_delay)
 
-    current = cursor_position()
+    current = cursor_position(stats)
     if input_changed_since(last_seen_input):
         return False, current
     if distance(current, expected) > CONFIG.user_move_tolerance_pixels:
@@ -423,49 +549,63 @@ def move_once(bounds: tuple[int, int, int, int]) -> tuple[bool, tuple[int, int]]
     return True, current
 
 
-def run_auto_movement() -> tuple[int, int]:
+def run_auto_movement(stats: RuntimeStats) -> tuple[int, int]:
     bounds = virtual_screen_bounds()
     log_action("Idle threshold reached. Moving cursor until you move it or the time window ends.")
-    expected = cursor_position()
+    expected = cursor_position(stats)
 
     while active_now():
-        moved_by_script, current = move_once(bounds)
+        moved_by_script, current = move_once(bounds, stats)
         if not moved_by_script:
+            stats.update(False)
             log_action("User input detected. Automatic movement paused.")
             return current
 
         expected = current
-        still_idle, current = wait_for(random.uniform(1.5, 5.0), expected)
+        still_idle, current = wait_for(random.uniform(1.5, 5.0), expected, stats)
         if not still_idle:
+            stats.update(False)
             log_action("User input detected. Automatic movement paused.")
             return current
 
     log_action("Outside the configured time window. Automatic movement paused.")
-    return cursor_position()
+    return cursor_position(stats)
 
 
 def main() -> None:
-    log_action(
-        f"Watching for {CONFIG.idle_seconds:g} seconds of keyboard/mouse idle time. "
-        "Press Ctrl+C to stop."
-    )
-    pause_for_lock_screen()
+    stats = RuntimeStats()
 
     try:
+        log_action(
+            f"Watching for {CONFIG.idle_seconds:g} seconds of keyboard/mouse idle time. "
+            "Press Ctrl+C to stop."
+        )
+        pause_for_lock_screen(stats)
+        stats.update(currently_idle())
+
         while True:
-            pause_for_lock_screen()
+            pause_for_lock_screen(stats)
+            is_idle = currently_idle()
+            stats.update(is_idle)
 
             if not active_now():
                 sleep_clock.sleep(CONFIG.poll_seconds)
                 continue
 
-            if seconds_since_last_input() >= CONFIG.idle_seconds:
-                run_auto_movement()
+            if is_idle:
+                run_auto_movement(stats)
 
             sleep_clock.sleep(CONFIG.poll_seconds)
     except KeyboardInterrupt:
         print()
         log_action("Stopped.")
+    finally:
+        stats.finish()
+        log_action(
+            "Session totals (lock-screen time excluded): "
+            f"IDLE {format_duration(stats.idle_seconds)}; "
+            f"not IDLE {format_duration(stats.not_idle_seconds)}."
+        )
 
 
 if __name__ == "__main__":
