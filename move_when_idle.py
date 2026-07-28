@@ -19,8 +19,8 @@ from pathlib import Path
 
 WTS_CURRENT_SESSION = 0xFFFFFFFF
 WTS_SESSION_INFO_EX = 25
-WTS_SESSIONSTATE_LOCK = 0
-WTS_SESSIONSTATE_UNLOCK = 1
+WTS_SESSION_STATE_LOCK = 0
+WTS_SESSION_STATE_UNLOCK = 1
 CONFIG_PATH = Path(__file__).with_name("move_when_idle_config.json")
 
 DEFAULT_CONFIG = {
@@ -140,41 +140,41 @@ class Point(ctypes.Structure):
 
 class LastInputInfo(ctypes.Structure):
     _fields_ = [
-        ("cbSize", wintypes.UINT),
-        ("dwTime", wintypes.DWORD),
+        ("cb_size", wintypes.UINT),
+        ("dw_time", wintypes.DWORD),
     ]
 
 
 class WtsInfoExLevel1(ctypes.Structure):
     _fields_ = [
-        ("SessionId", wintypes.ULONG),
-        ("SessionState", ctypes.c_int),
-        ("SessionFlags", wintypes.LONG),
-        ("WinStationName", wintypes.WCHAR * 33),
-        ("UserName", wintypes.WCHAR * 21),
-        ("DomainName", wintypes.WCHAR * 18),
-        ("LogonTime", ctypes.c_longlong),
-        ("ConnectTime", ctypes.c_longlong),
-        ("DisconnectTime", ctypes.c_longlong),
-        ("LastInputTime", ctypes.c_longlong),
-        ("CurrentTime", ctypes.c_longlong),
-        ("IncomingBytes", wintypes.DWORD),
-        ("OutgoingBytes", wintypes.DWORD),
-        ("IncomingFrames", wintypes.DWORD),
-        ("OutgoingFrames", wintypes.DWORD),
-        ("IncomingCompressedBytes", wintypes.DWORD),
-        ("OutgoingCompressedBytes", wintypes.DWORD),
+        ("session_id", wintypes.ULONG),
+        ("session_state", ctypes.c_int),
+        ("session_flags", wintypes.LONG),
+        ("win_station_name", wintypes.WCHAR * 33),
+        ("user_name", wintypes.WCHAR * 21),
+        ("domain_name", wintypes.WCHAR * 18),
+        ("logon_time", ctypes.c_longlong),
+        ("connect_time", ctypes.c_longlong),
+        ("disconnect_time", ctypes.c_longlong),
+        ("last_input_time", ctypes.c_longlong),
+        ("current_time", ctypes.c_longlong),
+        ("incoming_bytes", wintypes.DWORD),
+        ("outgoing_bytes", wintypes.DWORD),
+        ("incoming_frames", wintypes.DWORD),
+        ("outgoing_frames", wintypes.DWORD),
+        ("incoming_compressed_bytes", wintypes.DWORD),
+        ("outgoing_compressed_bytes", wintypes.DWORD),
     ]
 
 
 class WtsInfoExLevel(ctypes.Union):
-    _fields_ = [("Level1", WtsInfoExLevel1)]
+    _fields_ = [("level_1", WtsInfoExLevel1)]
 
 
 class WtsInfoEx(ctypes.Structure):
     _fields_ = [
-        ("Level", wintypes.DWORD),
-        ("Data", WtsInfoExLevel),
+        ("level", wintypes.DWORD),
+        ("data", WtsInfoExLevel),
     ]
 
 
@@ -271,13 +271,13 @@ def session_status_detail(status: SessionStatus) -> str:
 
 
 def parse_session_status(info: WtsInfoEx) -> SessionStatus:
-    if info.Level != 1:
-        return SessionStatus(None, f"Unexpected WTSSessionInfoEx level: {info.Level}")
+    if info.level != 1:
+        return SessionStatus(None, f"Unexpected WTSSessionInfoEx level: {info.level}")
 
-    session_flags = int(info.Data.Level1.SessionFlags)
-    if session_flags == WTS_SESSIONSTATE_LOCK:
+    session_flags = int(info.data.level_1.session_flags)
+    if session_flags == WTS_SESSION_STATE_LOCK:
         return SessionStatus(True, "Windows session is locked")
-    if session_flags == WTS_SESSIONSTATE_UNLOCK:
+    if session_flags == WTS_SESSION_STATE_UNLOCK:
         return SessionStatus(False, "Windows session is unlocked")
     return SessionStatus(None, f"Unknown Windows session flag: {session_flags}")
 
@@ -351,11 +351,10 @@ def pause_for_lock_screen(stats: RuntimeStats | None = None) -> float:
 
 
 def last_input_tick_count() -> int:
-    info = LastInputInfo()
-    info.cbSize = ctypes.sizeof(LastInputInfo)
+    info = LastInputInfo(ctypes.sizeof(LastInputInfo), 0)
     if not user32.GetLastInputInfo(ctypes.byref(info)):
         raise ctypes.WinError(ctypes.get_last_error())
-    return int(info.dwTime)
+    return int(info.dw_time)
 
 
 def seconds_since_last_input() -> float:
