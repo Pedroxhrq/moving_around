@@ -139,6 +139,8 @@ class Point(ctypes.Structure):
 
 
 class LastInputInfo(ctypes.Structure):
+    """Mirror the Win32 LASTINPUTINFO layout with snake_case field names."""
+
     _fields_ = [
         ("cb_size", wintypes.UINT),
         ("dw_time", wintypes.DWORD),
@@ -146,6 +148,8 @@ class LastInputInfo(ctypes.Structure):
 
 
 class WtsInfoExLevel1(ctypes.Structure):
+    """Mirror the WTSINFOEX_LEVEL1 layout with snake_case field names."""
+
     _fields_ = [
         ("session_id", wintypes.ULONG),
         ("session_state", ctypes.c_int),
@@ -168,10 +172,14 @@ class WtsInfoExLevel1(ctypes.Structure):
 
 
 class WtsInfoExLevel(ctypes.Union):
+    """Mirror the WTSINFOEX_LEVEL union with snake_case field names."""
+
     _fields_ = [("level_1", WtsInfoExLevel1)]
 
 
 class WtsInfoEx(ctypes.Structure):
+    """Mirror the WTSINFOEX layout with snake_case field names."""
+
     _fields_ = [
         ("level", wintypes.DWORD),
         ("data", WtsInfoExLevel),
@@ -187,6 +195,8 @@ class SessionStatus:
 
 @dataclass
 class RuntimeStats:
+    """Track idle/non-idle runtime while excluding paused lock-screen time."""
+
     idle_seconds: float = 0.0
     not_idle_seconds: float = 0.0
     _is_idle: bool = False
